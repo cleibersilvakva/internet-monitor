@@ -35,7 +35,7 @@ def telegram(msg: str):
 def speedtest() -> dict:
     try:
         res = subprocess.run(
-            ["speedtest-cli", "--simple"],
+            ["python3", "-m", "speedtest", "--simple"],
             capture_output=True, text=True, timeout=cfg.SPEEDTEST_TIMEOUT_S,
         )
         data = {}
