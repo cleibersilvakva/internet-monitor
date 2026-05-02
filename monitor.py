@@ -10,7 +10,9 @@ import sqlite3
 import urllib.request
 import urllib.parse
 import logging
+import re
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -41,12 +43,22 @@ def init_db():
         conn.execute("""
             CREATE TABLE IF NOT EXISTS eventos (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                tipo        TEXT NOT NULL,   -- 'offline' | 'degradado'
-                inicio      TEXT NOT NULL,   -- ISO 8601
+                tipo        TEXT NOT NULL,
+                inicio      TEXT NOT NULL,
                 fim         TEXT,
                 duracao_seg INTEGER,
                 latencia_ms REAL,
                 perda_pct   REAL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS speedtests (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp     TEXT NOT NULL,
+                ping_ms       REAL,
+                download_mbps REAL,
+                upload_mbps   REAL,
+                erro          TEXT
             )
         """)
 
@@ -58,6 +70,14 @@ def db_iniciar_evento(tipo: str, latencia: float, perda: float) -> int:
             (tipo, datetime.now().isoformat(), latencia, perda),
         )
         return cur.lastrowid
+
+
+def db_salvar_speedtest(ping_ms, download_mbps, upload_mbps, erro=None):
+    with sqlite3.connect(cfg.DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO speedtests (timestamp, ping_ms, download_mbps, upload_mbps, erro) VALUES (?,?,?,?,?)",
+            (datetime.now().isoformat(), ping_ms, download_mbps, upload_mbps, erro),
+        )
 
 
 def db_encerrar_evento(event_id: int) -> int:
@@ -95,6 +115,50 @@ def telegram(msg: str) -> bool:
     except Exception as e:
         log.warning(f"Telegram falhou: {e}")
         return False
+
+
+# ---------------------------------------------------------------------------
+# Speedtest periódico
+# ---------------------------------------------------------------------------
+
+def _run_speedtest():
+    log.info("Speedtest iniciado")
+    try:
+        res = subprocess.run(
+            ["speedtest-cli", "--simple"],
+            capture_output=True, text=True, timeout=cfg.SPEEDTEST_TIMEOUT_S,
+        )
+        ping_ms = download_mbps = upload_mbps = None
+        for linha in res.stdout.strip().splitlines():
+            m = re.search(r"[\d.]+", linha)
+            if not m:
+                continue
+            val = float(m.group())
+            if   "Ping"     in linha: ping_ms       = val
+            elif "Download" in linha: download_mbps = val
+            elif "Upload"   in linha: upload_mbps   = val
+        if download_mbps is None:
+            erro = res.stderr.strip() or "sem saída"
+            db_salvar_speedtest(None, None, None, erro)
+            log.warning(f"Speedtest falhou: {erro}")
+        else:
+            db_salvar_speedtest(ping_ms, download_mbps, upload_mbps)
+            log.info(f"Speedtest: ↓{download_mbps}Mbps ↑{upload_mbps}Mbps ping={ping_ms}ms")
+    except subprocess.TimeoutExpired:
+        db_salvar_speedtest(None, None, None, "timeout")
+        log.warning("Speedtest timeout")
+    except FileNotFoundError:
+        db_salvar_speedtest(None, None, None, "speedtest-cli não encontrado")
+        log.warning("speedtest-cli não encontrado")
+    except Exception as e:
+        db_salvar_speedtest(None, None, None, str(e))
+        log.warning(f"Speedtest erro: {e}")
+
+
+def _speedtest_loop():
+    while True:
+        _run_speedtest()
+        time.sleep(cfg.SPEEDTEST_INTERVAL_S)
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +229,9 @@ def run():
     init_db()
     log.info("Monitor iniciado")
     telegram("🟢 <b>Monitor de Internet iniciado</b>\nRaspberry Pi monitorando sua conexão a cada 30s.")
+
+    t = threading.Thread(target=_speedtest_loop, daemon=True)
+    t.start()
 
     estado        = "online"
     evento_id     = None          # ID do evento aberto no DB

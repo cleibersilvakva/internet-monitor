@@ -1,6 +1,6 @@
 # Telegram
-TELEGRAM_BOT_TOKEN = "8469193508:AAFoFGamn4SeITRGy-u3_iS5C7x54Q0Vxe4"
-TELEGRAM_CHAT_ID   = "915551687"
+TELEGRAM_BOT_TOKEN = "SEU_TOKEN_AQUI"
+TELEGRAM_CHAT_ID   = "SEU_CHAT_ID_AQUI"
 
 # Hosts testados em paralelo — 2/3 falhando = degradado, todos = offline
 PING_HOSTS  = ["8.8.8.8", "1.1.1.1", "1.0.0.1"]
@@ -14,8 +14,9 @@ CHECK_INTERVAL_S = 30
 LATENCY_WARN_MS   = 200   # ms
 PACKET_LOSS_WARN  = 30    # %
 
-# Speedtest no relatório diário
-SPEEDTEST_TIMEOUT_S = 90
+# Speedtest periódico (a cada 30 min) e timeout por execução
+SPEEDTEST_INTERVAL_S = 1800
+SPEEDTEST_TIMEOUT_S  = 90
 
 # Arquivo de log de eventos (SQLite)
 DB_PATH = "/opt/internet-monitor/data/events.db"

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 Relatório diário de internet — executado via cron às 7h.
-Faz speedtest + consolida eventos das últimas 24h + envia no Telegram.
+Consolida speedtests e eventos do dia anterior + envia no Telegram.
 """
 
-import subprocess
 import sqlite3
 import urllib.request
 import urllib.parse
@@ -29,27 +28,21 @@ def telegram(msg: str):
 
 
 # ---------------------------------------------------------------------------
-# Speedtest
+# Speedtests do dia anterior
 # ---------------------------------------------------------------------------
 
-def speedtest() -> dict:
-    try:
-        res = subprocess.run(
-            ["python3", "-m", "speedtest", "--simple"],
-            capture_output=True, text=True, timeout=cfg.SPEEDTEST_TIMEOUT_S,
-        )
-        data = {}
-        for linha in res.stdout.strip().splitlines():
-            if "Ping"     in linha: data["ping"]     = linha.split(":", 1)[1].strip()
-            if "Download" in linha: data["download"] = linha.split(":", 1)[1].strip()
-            if "Upload"   in linha: data["upload"]   = linha.split(":", 1)[1].strip()
-        return data if data else {"erro": res.stderr.strip() or "sem saída"}
-    except subprocess.TimeoutExpired:
-        return {"erro": "timeout"}
-    except FileNotFoundError:
-        return {"erro": "speedtest-cli não encontrado"}
-    except Exception as e:
-        return {"erro": str(e)}
+def speedtests_dia_anterior() -> list:
+    if not Path(cfg.DB_PATH).exists():
+        return []
+    ontem = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    with sqlite3.connect(cfg.DB_PATH) as conn:
+        return conn.execute(
+            """SELECT ping_ms, download_mbps, upload_mbps, erro
+               FROM speedtests
+               WHERE timestamp >= ? AND timestamp < ?
+               ORDER BY timestamp""",
+            (f"{ontem} 00:00:00", f"{ontem} 23:59:60"),
+        ).fetchall()
 
 
 # ---------------------------------------------------------------------------
@@ -87,34 +80,45 @@ def fmt_hora(iso: str) -> str:
 # ---------------------------------------------------------------------------
 
 def gerar_relatorio() -> str:
-    agora    = datetime.now().strftime("%d/%m/%Y %H:%M")
-    speed    = speedtest()
-    eventos  = eventos_24h()
+    agora      = datetime.now().strftime("%d/%m/%Y %H:%M")
+    ontem_str  = (datetime.now() - timedelta(days=1)).strftime("%d/%m/%Y")
+    testes     = speedtests_dia_anterior()
+    eventos    = eventos_24h()
 
     linhas = [f"📊 <b>Relatório de Internet — {agora}</b>", ""]
 
-    # Velocidade
-    if "erro" not in speed:
-        linhas += [
-            "📶 <b>Velocidade atual:</b>",
-            f"  ↓ {speed.get('download', '?')}",
-            f"  ↑ {speed.get('upload',   '?')}",
-            f"  ⏱ {speed.get('ping',     '?')}",
-            "",
-        ]
+    # Speedtest consolidado do dia anterior
+    linhas.append(f"📶 <b>Speedtest {ontem_str}:</b>")
+    if not testes:
+        linhas += ["  sem dados registrados", ""]
     else:
-        linhas += [f"📶 Speedtest indisponível: {speed['erro']}", ""]
+        validos = [(t[0], t[1], t[2]) for t in testes if t[3] is None]
+        erros   = sum(1 for t in testes if t[3] is not None)
+        if not validos:
+            linhas += [f"  todos os {len(testes)} testes falharam", ""]
+        else:
+            pings = [v[0] for v in validos if v[0] is not None]
+            downs = [v[1] for v in validos if v[1] is not None]
+            ups   = [v[2] for v in validos if v[2] is not None]
+            linhas.append(f"  {len(validos)} testes ({len(testes) - len(validos)} falhas)" if erros else f"  {len(validos)} testes")
+            if downs:
+                linhas.append(f"  ↓ {min(downs):.1f} / {sum(downs)/len(downs):.1f} / {max(downs):.1f} Mbps  (mín/méd/máx)")
+            if ups:
+                linhas.append(f"  ↑ {min(ups):.1f} / {sum(ups)/len(ups):.1f} / {max(ups):.1f} Mbps  (mín/méd/máx)")
+            if pings:
+                linhas.append(f"  ⏱ {min(pings):.0f} / {sum(pings)/len(pings):.0f} / {max(pings):.0f} ms  (mín/méd/máx)")
+            linhas.append("")
 
     # Incidentes
     if not eventos:
         linhas.append("✅ <b>Últimas 24h:</b> nenhum incidente registrado")
     else:
-        total_offline  = sum(e[3] or 0 for e in eventos if e[0] == "offline")
+        total_offline   = sum(e[3] or 0 for e in eventos if e[0] == "offline")
         total_degradado = sum(e[3] or 0 for e in eventos if e[0] == "degradado")
         linhas += [
-            f"⚠️ <b>Incidentes nas últimas 24h:</b>",
-            f"  🔴 Offline total:    {fmt_duracao(total_offline)}",
-            f"  🟡 Degradado total:  {fmt_duracao(total_degradado)}",
+            "⚠️ <b>Incidentes nas últimas 24h:</b>",
+            f"  🔴 Offline total:   {fmt_duracao(total_offline)}",
+            f"  🟡 Degradado total: {fmt_duracao(total_degradado)}",
             "",
         ]
         for tipo, inicio, fim, duracao in eventos:
